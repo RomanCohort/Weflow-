@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[oc]
+.venv/
+
+# Secrets and local runtime state
+.env
+.env.*
+data/
+wechatauto_logs/
+*.log
+wx4py.log
+wx4py_send_audit.jsonl
+
+# Editors / tools
+.codex/
+.claude/
+.agents/
+.DS_Store

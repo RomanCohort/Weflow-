@@ -1,0 +1,166 @@
+"""Small `.env` editor used by the terminal UI.
+
+The normal runtime still reads configuration through `config.Settings`. This
+module only handles the operator-facing edit/save path and intentionally keeps
+the first supported surface small: agent backend, native model, OpenClaw agent
+id, probability wake chance, participation posture, and group mention policy.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+from .config import Settings
+
+
+ENV_PATH = Path(".env")
+AGENT_CONFIG_KEYS = (
+    "WO_AGENT_BACKEND",
+    "WO_AGENT_BASE_PROBABILITY",
+    "WO_AGENT_PROACTIVE_MODE",
+    "WO_AGENT_CONTINUATION_ENABLED",
+    "WO_AGENT_CONTINUATION_MAX_FOLLOWUPS",
+    "WO_AGENT_CONTINUATION_DELAY_SECONDS",
+    "WO_AGENT_CONTINUATION_TTL_SECONDS",
+    "WO_REPLY_MENTION_POLICY",
+    "WO_LLM_MODEL",
+    "WO_OPENCLAW_AGENT_ID",
+)
+
+
+@dataclass(frozen=True)
+class AgentRuntimeConfig:
+    backend: str
+    proactive_mode: str
+    llm_model: str
+    openclaw_agent_id: str
+    agent_base_probability: float = 0.25
+    reply_mention_policy: str = "explicit"
+    continuation_enabled: bool = True
+    continuation_max_followups: int = 2
+    continuation_delay_seconds: int = 90
+    continuation_ttl_seconds: int = 600
+    native_configured: bool = False
+    openclaw_token_configured: bool = False
+    openclaw_configured: bool = False
+
+    def env_updates(self) -> dict[str, str]:
+        return {
+            "WO_AGENT_BACKEND": self.backend,
+            "WO_AGENT_BASE_PROBABILITY": f"{self.agent_base_probability:g}",
+            "WO_AGENT_PROACTIVE_MODE": self.proactive_mode,
+            "WO_AGENT_CONTINUATION_ENABLED": "true" if self.continuation_enabled else "false",
+            "WO_AGENT_CONTINUATION_MAX_FOLLOWUPS": str(self.continuation_max_followups),
+            "WO_AGENT_CONTINUATION_DELAY_SECONDS": str(self.continuation_delay_seconds),
+            "WO_AGENT_CONTINUATION_TTL_SECONDS": str(self.continuation_ttl_seconds),
+            "WO_REPLY_MENTION_POLICY": self.reply_mention_policy,
+            "WO_LLM_MODEL": self.llm_model,
+            "WO_OPENCLAW_AGENT_ID": self.openclaw_agent_id,
+        }
+
+
+def load_agent_runtime_config() -> AgentRuntimeConfig:
+    current = Settings()
+    return AgentRuntimeConfig(
+        backend=(current.agent_backend or "native").lower(),
+        proactive_mode=current.agent_proactive_mode,
+        llm_model=current.llm_model,
+        openclaw_agent_id=current.openclaw_agent_id,
+        agent_base_probability=current.agent_base_probability,
+        reply_mention_policy=current.reply_mention_policy,
+        continuation_enabled=current.agent_continuation_enabled,
+        continuation_max_followups=current.agent_continuation_max_followups,
+        continuation_delay_seconds=current.agent_continuation_delay_seconds,
+        continuation_ttl_seconds=current.agent_continuation_ttl_seconds,
+        native_configured=bool(current.llm_api_key),
+        openclaw_token_configured=bool(current.openclaw_token),
+        openclaw_configured=bool(current.openclaw_token and current.openclaw_agent_id),
+    )
+
+
+def save_agent_runtime_config(
+    config: AgentRuntimeConfig,
+    *,
+    env_path: Path = ENV_PATH,
+) -> dict[str, str]:
+    updates = _validated_updates(config)
+    _update_env_file(env_path, updates)
+    return updates
+
+
+def _validated_updates(config: AgentRuntimeConfig) -> dict[str, str]:
+    backend = config.backend.strip().lower()
+    proactive_mode = config.proactive_mode.strip().lower()
+    llm_model = config.llm_model.strip()
+    openclaw_agent_id = config.openclaw_agent_id.strip()
+    probability = float(config.agent_base_probability)
+    mention_policy = config.reply_mention_policy.strip().lower()
+    continuation_max = int(config.continuation_max_followups)
+    continuation_delay = int(config.continuation_delay_seconds)
+    continuation_ttl = int(config.continuation_ttl_seconds)
+    if backend not in {"native", "openclaw"}:
+        raise ValueError("后端只能是 native 或 openclaw")
+    if not 0.0 <= probability <= 1.0:
+        raise ValueError("触发概率必须在 0 到 1 之间")
+    if proactive_mode not in {"off", "reactive", "proactive"}:
+        raise ValueError("主动模式只能是 off、reactive 或 proactive")
+    if mention_policy not in {"always", "explicit", "never"}:
+        raise ValueError("@ 策略只能是 always、explicit 或 never")
+    if continuation_max < 0:
+        raise ValueError("continuation max_followups must be >= 0")
+    if continuation_delay < 5:
+        raise ValueError("continuation delay must be >= 5 seconds")
+    if continuation_ttl < continuation_delay:
+        raise ValueError("continuation TTL must be >= delay")
+    if not llm_model:
+        raise ValueError("Native 模型不能为空")
+    if not openclaw_agent_id:
+        raise ValueError("OpenClaw Agent ID 不能为空")
+    return {
+        "WO_AGENT_BACKEND": backend,
+        "WO_AGENT_BASE_PROBABILITY": f"{probability:g}",
+        "WO_AGENT_PROACTIVE_MODE": proactive_mode,
+        "WO_AGENT_CONTINUATION_ENABLED": "true" if config.continuation_enabled else "false",
+        "WO_AGENT_CONTINUATION_MAX_FOLLOWUPS": str(continuation_max),
+        "WO_AGENT_CONTINUATION_DELAY_SECONDS": str(continuation_delay),
+        "WO_AGENT_CONTINUATION_TTL_SECONDS": str(continuation_ttl),
+        "WO_REPLY_MENTION_POLICY": mention_policy,
+        "WO_LLM_MODEL": llm_model,
+        "WO_OPENCLAW_AGENT_ID": openclaw_agent_id,
+    }
+
+
+def _update_env_file(path: Path, updates: dict[str, str]) -> None:
+    if path.exists():
+        lines = path.read_text(encoding="utf-8").splitlines()
+    else:
+        lines = [
+            "# Generated by `wechat-oracle run`.",
+            "# Edit values here or from the terminal UI.",
+            "",
+        ]
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in lines:
+        key = _active_env_key(line)
+        if key is None or key not in updates:
+            out.append(line)
+            continue
+        if key in seen:
+            continue
+        out.append(f"{key}={updates[key]}")
+        seen.add(key)
+    missing = [key for key in AGENT_CONFIG_KEYS if key in updates and key not in seen]
+    if missing and out and out[-1].strip():
+        out.append("")
+    for key in missing:
+        out.append(f"{key}={updates[key]}")
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+def _active_env_key(line: str) -> str | None:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in stripped:
+        return None
+    return stripped.split("=", 1)[0].strip()
