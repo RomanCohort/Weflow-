@@ -11,6 +11,7 @@ from typing import Any
 
 from ..config import settings
 from .tools import Tool, ToolError, ToolSpec, truncate_for_llm
+from .inbound_files import register_inbound_file_tools
 
 _TEXT_SUFFIXES = {".md", ".txt", ".csv", ".json"}
 _ALL_SUFFIXES = _TEXT_SUFFIXES | {".png", ".pdb"}
@@ -282,6 +283,7 @@ def register_output_file_tools(
     tools.register(WriteOutputFileTool(group_id=tools.group_id))
     tools.register(ListOutputFilesTool(group_id=tools.group_id))
     tools.register(ReadOutputFileTool(group_id=tools.group_id))
+    register_inbound_file_tools(tools)
     if attachment_sender is not None:
         tools.register(SendOutputFileTool(
             group_id=tools.group_id,
